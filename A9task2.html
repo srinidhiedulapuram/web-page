@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Medication Reminder & Health Tracker</title>
+  <style>
+    :root{
+      --bg:#f4f7fb; --card:#ffffff; --accent:#2563eb; --muted:#6b7280;
+      --success:#10b981; --danger:#ef4444;
+    }
+    *{box-sizing:border-box;font-family:Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial}
+    body{margin:0;background:var(--bg);color:#0f172a}
+    header{background:linear-gradient(90deg,var(--accent),#2bb7ff);color:white;padding:18px}
+    .container{max-width:1024px;margin:20px auto;padding:0 16px}
+    h1{margin:0;font-size:20px}
+    p.lead{margin:6px 0 0;color:rgba(255,255,255,0.95)}
+
+    .layout{display:grid;grid-template-columns:360px 1fr;gap:16px;margin-top:18px}
+    .panel{background:var(--card);border-radius:12px;padding:12px;box-shadow:0 10px 30px rgba(2,6,23,0.06)}
+    .small{font-size:13px;color:var(--muted)}
+
+    /* form */
+    .form-row{display:flex;gap:8px;margin-bottom:8px}
+    input, select, textarea, button{padding:8px;border-radius:8px;border:1px solid #e6e9f2}
+    button.btn{background:var(--accent);color:white;border:0;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(37,99,235,0.12);color:var(--accent)}
+
+    /* list */
+    .med-list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+    .med-card{padding:10px;border-radius:10px;background:linear-gradient(180deg,#fff,#fbfdff)}
+    .meta{color:var(--muted);font-size:13px;margin-top:6px}
+
+    /* schedule */
+    .upcoming{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+    .dose-card{border-left:4px solid var(--accent);padding:8px;border-radius:8px;background:#fff}
+    .dose-card.taken{opacity:0.6;border-left-color:var(--success)}
+    .actions{display:flex;gap:8px;margin-top:8px}
+
+    footer{max-width:1024px;margin:18px auto;padding:12px 16px;color:var(--muted);font-size:13px}
+
+    @media (max-width:880px){ .layout{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <h1>Medication Reminder & Health Tracker</h1>
+      <p class="lead">Add medicines, schedule times, get reminders, and track when doses are taken.</p>
+    </div>
+  </header>
+
+  <main class="container layout">
+    <!-- Left: Add medication -->
+    <section class="panel">
+      <strong>Add / Edit Medication</strong>
+      <div style="margin-top:8px" class="small">Enter medication details and schedule times (e.g., 08:00, 13:00)</div>
+
+      <div style="margin-top:10px">
+        <div class="form-row">
+          <input id="medName" placeholder="Medication name (e.g., Paracetamol)" />
+        </div>
+        <div class="form-row">
+          <input id="medDose" placeholder="Dose (e.g., 500 mg)" />
+          <input id="medQty" placeholder="Qty per dose (optional)" />
+        </div>
+        <div class="form-row">
+          <input id="medTimes" placeholder="Times (comma separated, 24h e.g. 08:00,13:00,21:00)" />
+        </div>
+        <div class="form-row">
+          <select id="medFrequency">
+            <option value="daily">Daily</option>
+            <option value="alternate">Alternate days</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <input id="startDate" type="date" />
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+          <button class="ghost" onclick="clearForm()">Clear</button>
+          <button class="btn" onclick="saveMedication()">Save Medication</button>
+        </div>
+      </div>
+
+      <hr style="margin:12px 0;border:none;border-top:1px solid #eef2ff">
+
+      <strong>Your Medications</strong>
+      <div id="medList" class="med-list"></div>
+    </section>
+
+    <!-- Right: Upcoming & History -->
+    <section class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong>Upcoming Doses</strong>
+        <div>
+          <button class="ghost" onclick="requestNotificationPermission()">Enable Notifications</button>
+          <button class="ghost" onclick="snoozeAll()">Snooze 10m</button>
+        </div>
+      </div>
+
+      <div style="margin-top:10px" class="small">Next scheduled doses across all medications (sorted).</div>
+
+      <div id="upcoming" style="margin-top:12px" class="upcoming"></div>
+
+      <hr style="margin:12px 0;border:none;border-top:1px solid #eef2ff">
+
+      <strong>Dose History</strong>
+      <div id="history" style="margin-top:10px"></div>
+    </section>
+  </main>
+
+  <footer>Data saved locally in your browser. Works offline after load. Browser notifications require permission.</footer>
+
+  <script>
+    /* ---------- App state & helpers ---------- */
+    const STORAGE_KEY = 'med_reminder_store_v1';
+    let store = loadStore();
+    let reminderTimers = []; // for active timeouts/intervals
+    let snoozeUntil = null;
+
+    function loadStore(){
+      try{
+        const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        s.meds = s.meds || [];
+        s.history = s.history || [];
+        return s;
+      }catch(e){ return {meds:[],history:[]}; }
+    }
+    function saveStore(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(store)); }
+
+    function parseTimes(timesStr){
+      // returns array of 'HH:MM' normalized strings
+      return timesStr.split(',').map(t=>t.trim()).filter(Boolean).map(t=>{
+        // normalize single-digit hours
+        const parts = t.split(':').map(p=>p.padStart(2,'0'));
+        return parts.join(':').slice(0,5);
+      });
+    }
+
+    function todayISODate(d=new Date()){
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString().split('T')[0];
+    }
+
+    function combineDateTime(dateISO, timeHHMM){
+      // return ISO string of that date + time in local timezone
+      const [y,m,d] = dateISO.split('-').map(Number);
+      const [hh,mm] = timeHHMM.split(':').map(Number);
+      const dt = new Date(y, m-1, d, hh, mm, 0, 0);
+      return dt.toISOString();
+    }
+
+    /* ---------- UI rendering ---------- */
+    function renderAll(){
+      renderMedList();
+      renderUpcoming();
+      renderHistory();
+      saveStore();
+    }
+
+    function renderMedList(){
+      const div = document.getElementById('medList');
+      div.innerHTML = '';
+      if(store.meds.length === 0){
+        div.innerHTML = '<div class="small" style="padding:10px">No medications yet — add one on the left.</div>';
+        return;
+      }
+      store.meds.forEach(m=>{
+        const el = document.createElement('div');
+        el.className = 'med-card';
+        el.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <strong>${escapeHtml(m.name)}</strong> <div class="small">${m.dose ? escapeHtml(m.dose) : ''} ${m.qty ? ' • '+escapeHtml(m.qty) : ''}</div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="ghost" onclick="editMed('${m.id}')">Edit</button>
+              <button class="ghost" onclick="deleteMed('${m.id}')">Delete</button>
+            </div>
+          </div>
+          <div class="meta">Times: ${m.times.join(', ')} • Frequency: ${m.frequency} • Start: ${m.startDate || 'today'}</div>
+        `;
+        div.appendChild(el);
+      });
+    }
+
+    function renderUpcoming(){
+      const up = document.getElementById('upcoming');
+      up.innerHTML = '';
+
+      const now = new Date();
+      // gather next 48 hours of doses (or next N doses)
+      const upcomingList = [];
+
+      // build doses for the next 3 days to be safe
+      for(let dayOffset=0; dayOffset<3; dayOffset++){
+        const date = new Date();
+        date.setDate(date.getDate() + dayOffset);
+        const dateISO = todayISODate(date);
+
+        store.meds.forEach(m=>{
+          // frequency handling
+          if(!isMedicationActiveOnDate(m, date)) return;
+          m.times.forEach(time=>{
+            const iso = combineDateTime(dateISO, time);
+            const dt = new Date(iso);
+            upcomingList.push({ med: m, timeISO: iso, dt });
+          });
+        });
+      }
+
+      // sort and filter out past doses older than now - 1 hour
+      const list = upcomingList
+        .filter(x => x.dt.getTime() > (now.getTime() - (60*60*1000))) // keep last hour too for marking taken
+        .sort((a,b)=>a.dt - b.dt)
+        .slice(0, 30);
+
+      if(list.length === 0){
+        up.innerHTML = '<div class="small">No upcoming doses scheduled.</div>';
+        return;
+      }
+
+      list.forEach(item=>{
+        const isTaken = store.history.some(h => h.medId === item.med.id && h.timeISO === item.timeISO);
+        const card = document.createElement('div');
+        card.className = 'dose-card' + (isTaken ? ' taken' : '');
+        const inMinutes = Math.round((item.dt - new Date())/60000);
+        const whenText = inMinutes < 0 ? `Due ${Math.abs(inMinutes)} min ago` : (inMinutes === 0 ? 'Due now' : `In ${inMinutes} min`);
+        card.innerHTML = `
+          <div><strong>${escapeHtml(item.med.name)}</strong> ${item.med.dose ? ' • '+escapeHtml(item.med.dose) : ''}</div>
+          <div class="small">${item.dt.toLocaleString()} • ${escapeHtml(item.med.frequency)}</div>
+          <div class="small" style="margin-top:6px">${whenText}</div>
+          <div class="actions">
+            <button class="ghost" onclick='markTaken("${item.med.id}","${item.timeISO}")' ${isTaken ? 'disabled' : ''}>Mark Taken</button>
+            <button class="ghost" onclick='snoozeDose("${item.med.id}","${item.timeISO}",10)'>Snooze 10m</button>
+            <button class="ghost" onclick='openMedDetails("${item.med.id}")'>Details</button>
+          </div>
+        `;
+        up.appendChild(card);
+      });
+    }
+
+    function renderHistory(){
+      const h = document.getElementById('history');
+      h.innerHTML = '';
+      if(store.history.length === 0){ h.innerHTML = '<div class="small">No history yet.</div>'; return; }
+      const recent = store.history.slice().sort((a,b)=>new Date(b.takenAt) - new Date(a.takenAt)).slice(0,30);
+      recent.forEach(entry=>{
+        const med = store.meds.find(m=>m.id===entry.medId) || {name:'(deleted)'};
+        const el = document.createElement('div');
+        el.style.padding = '8px';
+        el.style.borderTop = '1px solid #f1f5f9';
+        el.innerHTML = `<strong>${escapeHtml(med.name)}</strong> <span class="small"> • ${new Date(entry.takenAt).toLocaleString()} • scheduled ${new Date(entry.timeISO).toLocaleString()}</span>`;
+        h.appendChild(el);
+      });
+    }
+
+    /* ---------- CRUD for medications ---------- */
+    function saveMedication(){
+      const name = document.getElementById('medName').value.trim();
+      const dose = document.getElementById('medDose').value.trim();
+      const qty = document.getElementById('medQty').value.trim();
+      const timesRaw = document.getElementById('medTimes').value.trim();
+      const frequency = document.getElementById('medFrequency').value;
+      const startDate = document.getElementById('startDate').value || todayISODate();
+
+      if(!name || !timesRaw){
+        alert('Please enter medication name and at least one time.');
+        return;
+      }
+      const times = parseTimes(timesRaw);
+      if(times.length === 0){ alert('Enter valid times like 08:00,13:00'); return; }
+
+      // if editing: check hidden edit id
+      const editingId = document.getElementById('medName').dataset.editing;
+      if(editingId){
+        const m = store.meds.find(x=>x.id === editingId);
+        if(m){
+          m.name = name; m.dose = dose; m.qty = qty; m.times = times; m.frequency = frequency; m.startDate = startDate;
+        }
+        delete document.getElementById('medName').dataset.editing;
+      } else {
+        const id = 'MED-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
+        store.meds.push({ id, name, dose, qty, times, frequency, startDate });
+      }
+
+      saveStore();
+      clearForm();
+      renderAll();
+      scheduleReminders();
+    }
+
+    function editMed(id){
+      const m = store.meds.find(x=>x.id===id);
+      if(!m) return;
+      document.getElementById('medName').value = m.name;
+      document.getElementById('medDose').value = m.dose || '';
+      document.getElementById('medQty').value = m.qty || '';
+      document.getElementById('medTimes').value = m.times.join(', ');
+      document.getElementById('medFrequency').value = m.frequency || 'daily';
+      document.getElementById('startDate').value = m.startDate || todayISODate();
+      document.getElementById('medName').dataset.editing = m.id;
+      window.scrollTo({top:0,behavior:'smooth'});
+    }
+
+    function deleteMed(id){
+      if(!confirm('Delete this medication?')) return;
+      store.meds = store.meds.filter(m=>m.id!==id);
+      // also remove history of that med (optional)
+      store.history = store.history.filter(h=>h.medId !== id);
+      saveStore();
+      renderAll();
+      scheduleReminders();
+    }
+
+    function clearForm(){
+      document.getElementById('medName').value='';
+      document.getElementById('medDose').value='';
+      document.getElementById('medQty').value='';
+      document.getElementById('medTimes').value='';
+      document.getElementById('medFrequency').value='daily';
+      document.getElementById('startDate').value='';
+      delete document.getElementById('medName').dataset.editing;
+    }
+
+    /* ---------- schedule & reminders ---------- */
+    function isMedicationActiveOnDate(med, dateObj){
+      // dateObj is a Date for the candidate day
+      const start = med.startDate || todayISODate();
+      const startD = new Date(start);
+      const candidateDay = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+      if(candidateDay < new Date(startD.getFullYear(), startD.getMonth(), startD.getDate())) return false;
+
+      if(med.frequency === 'daily') return true;
+      if(med.frequency === 'alternate'){
+        const diff = Math.round((candidateDay - new Date(startD.getFullYear(), startD.getMonth(), startD.getDate())) / (24*60*60*1000));
+        return diff % 2 === 0;
+      }
+      if(med.frequency === 'weekly'){
+        const startWeekDay = startD.getDay(); // 0-6
+        return candidateDay.getDay() === startWeekDay;
+      }
+      return true;
+    }
+
+    function scheduleReminders(){
+      // clear existing timers
+      reminderTimers.forEach(t => clearTimeout(t));
+      reminderTimers = [];
+
+      const now = new Date();
+      // schedule next occurrences for each med/time for next 2 days
+      store.meds.forEach(m => {
+        for(let dayOffset=0; dayOffset<2; dayOffset++){
+          const date = new Date();
+          date.setDate(date.getDate() + dayOffset);
+          if(!isMedicationActiveOnDate(m, date)) continue;
+          const isoDate = todayISODate(date);
+          m.times.forEach(time => {
+            const iso = combineDateTime(isoDate, time);
+            const dt = new Date(iso);
+            if(snoozeUntil && dt < new Date(snoozeUntil)) return; // snoozed globally
+            const ms = dt.getTime() - now.getTime();
+            // if scheduled in past but within next hour, still allow marking or notification
+            if(ms > -60*60*1000 && ms < 24*60*60*1000){ // within reasonable window
+              const t = setTimeout(() => triggerReminder(m, iso), Math.max(ms, 0));
+              reminderTimers.push(t);
+            }
+          });
+        }
+      });
+      // also refresh upcoming display a bit later
+      setTimeout(renderUpcoming, 500);
+    }
+
+    function triggerReminder(med, timeISO){
+      // check if already taken
+      const already = store.history.some(h => h.medId === med.id && h.timeISO === timeISO);
+      if(already) {
+        renderUpcoming();
+        return;
+      }
+
+      // show browser notification if permission
+      if(Notification && Notification.permission === 'granted'){
+        const title = `Time to take: ${med.name}`;
+        const body = `${med.dose || ''} ${med.qty || ''} • ${new Date(timeISO).toLocaleString()}`;
+        const n = new Notification(title, { body, tag: med.id + '|' + timeISO });
+        n.onclick = () => window.focus();
+      } else {
+        // fallback: alert (non-ideal, but ensures user gets something)
+        console.log('Reminder for', med.name, timeISO);
+      }
+      // flash UI / update upcoming
+      renderUpcoming();
+      // Also automatically add a "missed" action after 30 minutes? (we keep manual)
+    }
+
+    function markTaken(medId, timeISO){
+      const already = store.history.some(h=>h.medId===medId && h.timeISO===timeISO);
+      if(already){
+        alert('Already marked taken.');
+        return;
+      }
+      store.history.push({ medId, timeISO, takenAt: new Date().toISOString() });
+      saveStore();
+      renderAll();
+    }
+
+    function snoozeDose(medId, timeISO, minutes=10){
+      // simple local snooze: set a timer minutes from now to remind again
+      const dt = new Date();
+      dt.setMinutes(dt.getMinutes() + minutes);
+      const iso = dt.toISOString();
+      // schedule the snoozed reminder
+      setTimeout(() => {
+        const med = store.meds.find(m=>m.id===medId);
+        if(med) triggerReminder(med, timeISO);
+      }, minutes*60*1000);
+      // also update UI
+      alert('Snoozed for ' + minutes + ' minutes.');
+    }
+
+    function snoozeAll(minutes=10){
+      const until = new Date();
+      until.setMinutes(until.getMinutes() + minutes);
+      snoozeUntil = until.toISOString();
+      // reschedule timers
+      scheduleReminders();
+      alert('All reminders snoozed for '+minutes+' minutes.');
+    }
+
+    function requestNotificationPermission(){
+      if(!('Notification' in window)){ alert('Notifications not supported in this browser.'); return; }
+      Notification.requestPermission().then(p => {
+        if(p === 'granted'){ alert('Notifications enabled.'); }
+        else { alert('Notifications denied or dismissed.'); }
+      });
+    }
+
+    /* ---------- small helpers & details ---------- */
+    function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function openMedDetails(id){
+      const m = store.meds.find(x=>x.id===id);
+      if(!m) return alert('Not found');
+      alert(`${m.name}\nDose: ${m.dose || '-'}\nTimes: ${m.times.join(', ')}\nFrequency: ${m.frequency}\nStart: ${m.startDate || 'today'}`);
+    }
+
+    /* ---------- initialization ---------- */
+    // wire up initial UI
+    document.addEventListener('DOMContentLoaded', () => {
+      // restore UI fields empty
+      renderAll();
+      scheduleReminders();
+
+      // update upcoming every 30 seconds so "In X min" updates
+      setInterval(renderUpcoming, 30*1000);
+    });
+
+    // re-schedule reminders when the page regains focus (in case system slept)
+    window.addEventListener('focus', () => {
+      scheduleReminders();
+    });
+
+    // expose some functions to the global scope for inline event handlers
+    window.editMed = editMed;
+    window.deleteMed = deleteMed;
+    window.markTaken = markTaken;
+    window.snoozeDose = snoozeDose;
+    window.requestNotificationPermission = requestNotificationPermission;
+    window.snoozeAll = snoozeAll;
+    window.openMedDetails = openMedDetails;
+  </script>
+</body>
+</html>
